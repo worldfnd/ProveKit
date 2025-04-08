@@ -1,9 +1,11 @@
 #![doc = include_str!("../README.md")]
+mod cmd;
 mod compiler;
 mod r1cs_matrices;
 mod solver;
 mod sparse_matrix;
 mod utils;
+mod witness;
 
 use {
     acir::FieldElement,
@@ -18,8 +20,9 @@ use {
     utils::{file_io::deserialize_witness_stack, PrintAbi},
 };
 
-/// Compile a R1CS instance and R1CS solver for the compiled Noir program, solve the R1CS witness
-/// values from the provided ACIR witness values, then check that the R1CS instance is satisfied.
+/// Compile a R1CS instance and R1CS solver for the compiled Noir program, solve
+/// the R1CS witness values from the provided ACIR witness values, then check
+/// that the R1CS instance is satisfied.
 #[derive(FromArgs)]
 struct Args {
     /// path to the compiled Noir program
@@ -82,8 +85,11 @@ fn main() -> AnyResult<()> {
         ));
     }
 
-    r1cs.matrices
-        .write_json_to_file(acir_circuit.public_parameters.0.len(), &witness, "r1cs.json")?;
+    r1cs.matrices.write_json_to_file(
+        acir_circuit.public_parameters.0.len(),
+        &witness,
+        "r1cs.json",
+    )?;
 
     Ok(())
 }
