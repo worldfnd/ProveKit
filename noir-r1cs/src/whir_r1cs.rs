@@ -231,6 +231,8 @@ pub fn run_sumcheck_prover(
 
     let mut fold = None;
 
+
+    
     for _ in 0..m_0 {
         // Here hhat_i_at_x represents hhat_i(x). hhat_i(x) is the qubic sumcheck
         // polynomial sent by the prover.
@@ -392,7 +394,7 @@ pub fn run_whir_pcs_verifier(
 pub fn create_io_pattern(m_0: usize, whir_params: &WhirConfig) -> IOPattern {
     IOPattern::new("🌪️")
         .add_rand(m_0)
-        .add_sumcheck_polynomials(m_0)
+        .add_sumcheck_polynomials(4, m_0)
         .commit_statement(&whir_params)
         .add_whir_proof(&whir_params)
 }

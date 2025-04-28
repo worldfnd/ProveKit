@@ -105,9 +105,9 @@ fn sumcheck_fold_map_reduce_inner<const N: usize, const M: usize>(
 
 /// Trait which is used to add sumcheck functionality fo IOPattern
 pub trait SumcheckIOPattern {
-    /// Prover sends coefficients of the qubic sumcheck polynomial and the
-    /// verifier sends randomness for the next sumcheck round
-    fn add_sumcheck_polynomials(self, num_vars: usize) -> Self;
+    /// Prover sends coefficients of the sumcheck polynomial with the given degree and the
+    /// verifier sends back the randomness for the next sumcheck round
+    fn add_sumcheck_polynomials(self, degree: usize, num_vars: usize) -> Self;
 
     /// Verifier sends the randomness on which the supposed 0-polynomial is
     /// evaluated
@@ -118,9 +118,9 @@ impl<IOPattern> SumcheckIOPattern for IOPattern
 where
     IOPattern: FieldDomainSeparator<FieldElement>,
 {
-    fn add_sumcheck_polynomials(mut self, num_vars: usize) -> Self {
+    fn add_sumcheck_polynomials(mut self, degree: usize, num_vars: usize) -> Self {
         for _ in 0..num_vars {
-            self = self.add_scalars(4, "Sumcheck Polynomials");
+            self = self.add_scalars(degree, "Sumcheck Polynomials");
             self = self.challenge_scalars(1, "Sumcheck Random");
         }
         self
@@ -163,6 +163,11 @@ fn eval_eq(eval: &[FieldElement], out: &mut [FieldElement], scalar: FieldElement
 /// Evaluates a qubic polynomial on a value
 pub fn eval_qubic_poly(poly: &[FieldElement], point: &FieldElement) -> FieldElement {
     poly[0] + *point * (poly[1] + *point * (poly[2] + *point * poly[3]))
+}
+
+/// Evaluates a qubic polynomial on a value
+pub fn eval_linear_poly(poly: &[FieldElement], point: &FieldElement) -> FieldElement {
+    poly[0] + *point * poly[1]
 }
 
 /// Given a path to JSON file with sparce matrices and a witness, calculates
