@@ -11,6 +11,7 @@ mod skyscraper;
 mod sparse_matrix;
 mod utils;
 mod whir_r1cs;
+mod grand_product_argument;
 
 pub use {
     crate::{
@@ -19,6 +20,7 @@ pub use {
         noir_to_r1cs::noir_to_r1cs,
         r1cs::R1CS,
         utils::human,
+        grand_product_argument::GrandProductArgument,
     },
     acir::FieldElement as NoirElement,
     gnark_config::write_gnark_parameters_to_file,
