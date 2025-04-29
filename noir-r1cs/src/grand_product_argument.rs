@@ -1,7 +1,7 @@
-use spongefish::codecs::arkworks_algebra::{FieldToUnitDeserialize, FieldToUnitSerialize, UnitToField};
+use spongefish::{codecs::arkworks_algebra::{FieldToUnitDeserialize, FieldToUnitSerialize, UnitToField}, ProverState};
 use whir::poly_utils::evals::EvaluationsList;
 
-use crate::{utils::{sumcheck::{calculate_evaluations_over_boolean_hypercube_for_eq, eval_linear_poly, eval_qubic_poly, sumcheck_fold_map_reduce, SumcheckIOPattern}, HALF}, whir_r1cs::IOPattern, FieldElement};
+use crate::{skyscraper::SkyscraperSponge, utils::{sumcheck::{calculate_eq, calculate_evaluations_over_boolean_hypercube_for_eq, eval_linear_poly, eval_qubic_poly, sumcheck_fold_map_reduce, SumcheckIOPattern}, HALF}, whir_r1cs::IOPattern, FieldElement};
 
 pub struct GrandProductArgument {}
 
@@ -13,7 +13,8 @@ impl GrandProductArgument {
     pub fn prove(&self) {
         let io: IOPattern = IOPattern::new("🌪️")
         .add_sumcheck_polynomials(2, 1)
-        .add_sumcheck_polynomials(4, 1);
+        .add_sumcheck_polynomials(4, 1)
+        .add_sumcheck_polynomials(2, 1);
 
         let mut merlin = io.to_prover_state();
 
@@ -28,67 +29,14 @@ impl GrandProductArgument {
         let mut r = [FieldElement::from(0); 1];
         merlin.fill_challenge_scalars(&mut r)
         .expect("Failed to add challenge scalar 1");
-        
-        let mut saved_val_for_sumcheck_equality_assertion = eval_linear_poly(&h, &r[0]);
 
+        let saved_val_for_sumcheck_equality_assertion = eval_linear_poly(&h, &r[0]);
+        
         let mut eq_r = calculate_evaluations_over_boolean_hypercube_for_eq(&r);
-        let mut g0 = [FieldElement::from(120), FieldElement::from(1760)];
-        let mut g1 = [FieldElement::from(3024), FieldElement::from(57120)];
+        let mut g0 = vec![FieldElement::from(120), FieldElement::from(17160)];
+        let mut g1 = vec![FieldElement::from(3024), FieldElement::from(57120)];
         
-        let mut alpha = Vec::<FieldElement>::with_capacity(1);
-        let mut fold = None;
-
-
-        for _ in 0..1 {
-            let [hhat_i_at_0, hhat_i_at_em1, hhat_i_at_inf_over_x_cube] =
-            sumcheck_fold_map_reduce([&mut eq_r, &mut g0, &mut g1], fold, |[eq_r, g0, g1]| {
-                [
-                    // Evaluation at 0
-                    eq_r.0 * g0.0 * g1.0,
-                    // Evaluation at -1
-                    (eq_r.0 + eq_r.0 - eq_r.1) * (g0.0 + g0.0 - g0.1) * (g1.0 + g1.0 - g1.1),
-                    // Evaluation at infinity
-                    (eq_r.1 - eq_r.0) * (g0.1 - g0.0) * (g1.1 - g1.0),
-                ]
-            });
-
-            let mut hhat_i_coeffs = [FieldElement::from(0); 4];
-            
-            hhat_i_coeffs[0] = hhat_i_at_0;
-            hhat_i_coeffs[2] = HALF
-                * (saved_val_for_sumcheck_equality_assertion + hhat_i_at_em1
-                    - hhat_i_at_0
-                    - hhat_i_at_0
-                    - hhat_i_at_0);
-            hhat_i_coeffs[3] = hhat_i_at_inf_over_x_cube;
-            hhat_i_coeffs[1] = saved_val_for_sumcheck_equality_assertion
-                - hhat_i_coeffs[0]
-                - hhat_i_coeffs[0]
-                - hhat_i_coeffs[3]
-                - hhat_i_coeffs[2];
-    
-            assert_eq!(
-                saved_val_for_sumcheck_equality_assertion,
-                hhat_i_coeffs[0]
-                    + hhat_i_coeffs[0]
-                    + hhat_i_coeffs[1]
-                    + hhat_i_coeffs[2]
-                    + hhat_i_coeffs[3]
-            );
-            
-            let _ = merlin.add_scalars(&hhat_i_coeffs[..]);
-            let mut alpha_i_wrapped_in_vector = [FieldElement::from(0)];
-            let _ = merlin.fill_challenge_scalars(&mut alpha_i_wrapped_in_vector);
-            let alpha_i = alpha_i_wrapped_in_vector[0];
-            alpha.push(alpha_i);
-    
-            fold = Some(alpha_i);
-    
-            saved_val_for_sumcheck_equality_assertion = eval_qubic_poly(&hhat_i_coeffs, &alpha_i);
-        }
-
-
-
+        let (merlin, saved_value) = run_sumcheck(merlin, &mut g0, &mut g1, &mut eq_r, saved_val_for_sumcheck_equality_assertion);
 
         let transcript = merlin.narg_string().to_vec();
         let mut arthur = io.to_verifier_state(&transcript);
@@ -110,7 +58,100 @@ impl GrandProductArgument {
         arthur.fill_challenge_scalars(&mut alpha_verifier)
             .expect("Failed to fill next scalars");
 
-        assert_eq!(eval_linear_poly(&h_verifier, &r_verifier[0]), eval_qubic_poly(&sch_verifier, &FieldElement::from(0)) + eval_qubic_poly(&sch_verifier, &FieldElement::from(1)));
+        let mut left_side = calculate_eq(&r_verifier, &alpha_verifier);
 
+        arthur.fill_next_scalars(&mut h_verifier)
+            .expect("Failed to fill next scalars");
+        arthur.fill_challenge_scalars(&mut r_verifier)
+            .expect("Failed to fill next scalars");
+
+        left_side = left_side * eval_linear_poly(&h_verifier, &FieldElement::from(0)) * eval_linear_poly(&h_verifier, &FieldElement::from(1));
+        
+        assert_eq!(left_side, saved_value);
     }
+}
+
+fn run_sumcheck(
+    mut merlin: ProverState<SkyscraperSponge, FieldElement>,
+    mut g0: &mut Vec<FieldElement>,
+    mut g1: &mut Vec<FieldElement>,
+    mut eq_r: &mut Vec<FieldElement>,
+    mut saved_val_for_sumcheck_equality_assertion: FieldElement,
+) -> (ProverState<SkyscraperSponge, FieldElement>, FieldElement) {
+    let mut alpha = Vec::<FieldElement>::with_capacity(1);
+    let mut fold = None;
+
+
+    for _ in 0..1 {
+        let [hhat_i_at_0, hhat_i_at_em1, hhat_i_at_inf_over_x_cube] =
+            sumcheck_fold_map_reduce([&mut eq_r, &mut g0, &mut g1], fold, |[eq_r, g0, g1]| {
+                [
+                    // Evaluation at 0
+                    eq_r.0 * g0.0 * g1.0,
+                    // Evaluation at -1
+                    (eq_r.0 + eq_r.0 - eq_r.1) * (g0.0 + g0.0 - g0.1) * (g1.0 + g1.0 - g1.1),
+                    // Evaluation at infinity
+                    (eq_r.1 - eq_r.0) * (g0.1 - g0.0) * (g1.1 - g1.0),
+                ]
+            });
+
+        if fold.is_some() {
+            eq_r.truncate(eq_r.len() / 2);
+            g0.truncate(g0.len() / 2);
+            g1.truncate(g1.len() / 2);
+        }
+
+        let mut hhat_i_coeffs = [FieldElement::from(0); 4];
+        
+        hhat_i_coeffs[0] = hhat_i_at_0;
+        hhat_i_coeffs[2] = HALF
+            * (saved_val_for_sumcheck_equality_assertion + hhat_i_at_em1
+                - hhat_i_at_0
+                - hhat_i_at_0
+                - hhat_i_at_0);
+        hhat_i_coeffs[3] = hhat_i_at_inf_over_x_cube;
+        hhat_i_coeffs[1] = saved_val_for_sumcheck_equality_assertion
+            - hhat_i_coeffs[0]
+            - hhat_i_coeffs[0]
+            - hhat_i_coeffs[3]
+            - hhat_i_coeffs[2];
+
+        assert_eq!(
+            saved_val_for_sumcheck_equality_assertion,
+            hhat_i_coeffs[0]
+                + hhat_i_coeffs[0]
+                + hhat_i_coeffs[1]
+                + hhat_i_coeffs[2]
+                + hhat_i_coeffs[3]
+        );
+        
+        let _ = merlin.add_scalars(&hhat_i_coeffs[..]);
+        let mut alpha_i_wrapped_in_vector = [FieldElement::from(0)];
+        let _ = merlin.fill_challenge_scalars(&mut alpha_i_wrapped_in_vector);
+        let alpha_i = alpha_i_wrapped_in_vector[0];
+        alpha.push(alpha_i);
+        fold = Some(alpha_i);
+        saved_val_for_sumcheck_equality_assertion = eval_qubic_poly(&hhat_i_coeffs, &alpha_i);
+    }
+
+    let folded_g0 = g0[0] + (g0[1] - g0[0]) * alpha.last().unwrap();
+    let folded_g1 = g1[0] + (g1[1] - g1[0]) * alpha.last().unwrap();
+    let folded_eq_r = eq_r[0] + (eq_r[1] - eq_r[0]) * alpha.last().unwrap();
+
+    assert_eq!(saved_val_for_sumcheck_equality_assertion, folded_g0 * folded_g1 * folded_eq_r);
+
+    let h_evaluations = EvaluationsList::new(vec![folded_g0, folded_g1]);
+    let h_temp = h_evaluations.to_coeffs();
+    let mut h = h_temp.coeffs();
+    
+    merlin
+    .add_scalars(&mut h)
+    .expect("Failed to add h");
+
+    let mut r = [FieldElement::from(0); 1];
+    merlin.fill_challenge_scalars(&mut r)
+    .expect("Failed to add challenge scalar 1");
+
+    alpha.push(r[0]);
+    (merlin, saved_val_for_sumcheck_equality_assertion)
 }
