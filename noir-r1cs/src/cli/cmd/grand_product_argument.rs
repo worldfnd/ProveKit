@@ -1,4 +1,4 @@
-use {super::Command, anyhow::Result, argh::FromArgs, tracing::instrument};
+use {super::Command, anyhow::Result, argh::FromArgs, noir_r1cs::FieldElement, tracing::instrument};
 use noir_r1cs::GrandProductArgument;
 
 /// Prove a prepared Noir program
@@ -19,7 +19,8 @@ pub struct Args {
 impl Command for Args {
     #[instrument(skip_all)]
     fn run(&self) -> Result<()> {
-        let gpa = GrandProductArgument::new();
+        let array_to_prove = (2..=129).map(|x| FieldElement::from(x as u64)).collect::<Vec<_>>();
+        let gpa = GrandProductArgument::new(array_to_prove);
         gpa.prove();
         Ok(()) // Ensure compatibility with EarlyExit
     }

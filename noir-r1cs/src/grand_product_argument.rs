@@ -1,27 +1,67 @@
+use core::num;
+use std::{fmt::Debug, os::macos::raw::stat};
+
+use ark_poly::EvaluationDomain;
 use spongefish::{codecs::arkworks_algebra::{FieldToUnitDeserialize, FieldToUnitSerialize, UnitToField}, ProverState};
-use whir::poly_utils::evals::EvaluationsList;
+use whir::{parameters::{default_max_pow, FoldType, FoldingFactor, SoundnessType}, poly_utils::{evals::EvaluationsList, multilinear::MultilinearPoint}, whir::{committer::{CommitmentReader, CommitmentWriter}, domainsep::WhirDomainSeparator, prover::Prover, statement::{Statement, StatementVerifier, VerifierWeights, Weights}, verifier::Verifier}};
 
-use crate::{skyscraper::SkyscraperSponge, utils::{sumcheck::{calculate_eq, calculate_evaluations_over_boolean_hypercube_for_eq, eval_linear_poly, eval_qubic_poly, sumcheck_fold_map_reduce, SumcheckIOPattern}, HALF}, whir_r1cs::IOPattern, FieldElement};
+use crate::{skyscraper::SkyscraperSponge, utils::{next_power_of_two, sumcheck::{calculate_eq, calculate_evaluations_over_boolean_hypercube_for_eq, eval_linear_poly, eval_qubic_poly, sumcheck_fold_map_reduce, SumcheckIOPattern}, HALF}, whir_r1cs::{IOPattern, MultivariateParameters, WhirConfig, WhirParameters, WhirProof}, FieldElement};
 
-pub struct GrandProductArgument {}
+pub struct GrandProductArgument {
+    pub arr: Vec<FieldElement>,
+    pub whir_config: WhirConfig,
+}
 
 pub struct GrandProductArgumentProof {
     transcript: Vec<u8>,
     claimed_product: FieldElement,
     num_of_layers: usize,
+    whir_proof: WhirProof,
 }
 
 impl GrandProductArgument {
-    pub fn new() -> Self {
-        GrandProductArgument {}
+    pub fn new(mut arr: Vec<FieldElement>) -> Self {
+        arr.resize(arr.len().next_power_of_two(), FieldElement::from(1));
+        let num_variables = next_power_of_two(arr.len());
+        let mv_params = MultivariateParameters::new(num_variables);
+        let whir_params = WhirParameters {
+            initial_statement:     true,
+            security_level:        128,
+            pow_bits:              default_max_pow(num_variables, 1),
+            folding_factor:        FoldingFactor::Constant(4),
+            leaf_hash_params:      (),
+            two_to_one_params:     (),
+            soundness_type:        SoundnessType::ConjectureList,
+            fold_optimisation:     FoldType::ProverHelps,
+            _pow_parameters:       Default::default(),
+            starting_log_inv_rate: 1,
+        };
+        let whir_config = WhirConfig::new(mv_params, whir_params);
+        
+        GrandProductArgument {
+            whir_config, arr,
+        }
     }
 
     pub fn prove(&self)  {
-        let array_to_prove = (2..=33).map(|x| FieldElement::from(x as u64)).collect::<Vec<_>>();
-        let layers = calculate_binary_multiplication_tree(array_to_prove);
-
-        let io = create_io_pattern(layers.len());
+        let layers = calculate_binary_multiplication_tree(self.arr.clone());
+        let io = create_io_pattern(layers.len(), &self.whir_config);
         let mut merlin = io.to_prover_state();
+
+        let committer = CommitmentWriter::new(self.whir_config.clone());
+
+        let poly = EvaluationsList::new(self.arr.clone());
+        let polynomial = poly.to_coeffs();
+
+        println!("{:?}", self.arr);
+        println!("{:?}", polynomial);
+        let formatted_config = format!("{:?}", self.whir_config);
+        println!("{}", formatted_config);
+
+        let witness = committer
+            .commit(&mut merlin, polynomial)
+            .expect("WHIR prover failed to commit");
+
         let mut saved_val_for_sumcheck_equality_assertion;
         let mut r;
         let mut line_evaluations;
@@ -33,11 +73,23 @@ impl GrandProductArgument {
             (merlin, line_evaluations, alpha) = run_sumcheck(merlin, &r, layers[i].clone(), saved_val_for_sumcheck_equality_assertion, alpha);
             (merlin, r, saved_val_for_sumcheck_equality_assertion) = add_line_to_merlin(merlin, line_evaluations.to_vec());
         }
-
         alpha.push(r[0]);
+
+        println!("Alpha length {:?}", alpha.len());
+        println!("Arr log length {:?}", next_power_of_two(self.arr.len()));
+
+        let mut statement = Statement::<FieldElement>::new(next_power_of_two(self.arr.len()));
+        let weight = Weights::evaluation(MultilinearPoint(alpha));
+        statement.add_constraint(weight, saved_val_for_sumcheck_equality_assertion);
+
+        let prover = Prover(self.whir_config.clone());
+        let whir_proof = prover
+            .prove(&mut merlin, statement, witness)
+            .expect("WHIR prover failed to generate a proof");
 
         let transcript = merlin.narg_string().to_vec();
         let proof = GrandProductArgumentProof { 
+            whir_proof,
             transcript,
             claimed_product: layers[0][0],
             num_of_layers: layers.len(),
@@ -46,7 +98,7 @@ impl GrandProductArgument {
     }
 
     pub fn verify(&self, proof: GrandProductArgumentProof) {
-        let io = create_io_pattern(proof.num_of_layers);
+        let io = create_io_pattern(proof.num_of_layers, &self.whir_config);
         let mut arthur = io.to_verifier_state(&proof.transcript);
 
         let mut l = [FieldElement::from(0); 2];
@@ -58,6 +110,9 @@ impl GrandProductArgument {
         let mut prev_rand = Vec::<FieldElement>::new();
         let mut rand = Vec::<FieldElement>::new();
 
+        let commitment_reader = CommitmentReader::new(&self.whir_config);
+        let parsed_commitment = commitment_reader.parse_commitment(&mut arthur).unwrap();
+        
         for i in 0..proof.num_of_layers-1 {
             for _ in 0..i {
                 arthur.fill_next_scalars(&mut h)
@@ -79,7 +134,17 @@ impl GrandProductArgument {
             rand = Vec::<FieldElement>::new();
             last_sumcheck_value = eval_linear_poly(&l, &r[0]);
         }
+
+        let weights = VerifierWeights::evaluation(MultilinearPoint(prev_rand));
+        let mut statement_verifier = StatementVerifier::from_statement(&Statement::<FieldElement>::new(next_power_of_two(self.arr.len())));
+        statement_verifier.add_constraint(weights, last_sumcheck_value);
+            
+        let verifier = Verifier::new(&self.whir_config);
+        verifier.verify(&mut arthur, &parsed_commitment, &statement_verifier, &proof.whir_proof)
+            .expect("WHIR verifier failed to verify the proof");
     }
+
+
 }
 
 fn run_sumcheck(
@@ -155,9 +220,7 @@ fn run_sumcheck(
     (merlin, [folded_v0, folded_v1], alpha) 
 }
 
-fn calculate_binary_multiplication_tree(mut array_to_prove: Vec<FieldElement>) -> Vec<Vec<FieldElement>> {
-    array_to_prove.resize(array_to_prove.len().next_power_of_two(), FieldElement::from(1));
-
+fn calculate_binary_multiplication_tree(array_to_prove: Vec<FieldElement>) -> Vec<Vec<FieldElement>> {
     let mut layers = vec![];
     let mut current_layer = array_to_prove;
 
@@ -193,8 +256,10 @@ fn split_by_index(input: Vec<FieldElement>) -> (Vec<FieldElement>, Vec<FieldElem
     (even_indexed, odd_indexed)
 }
 
-fn create_io_pattern(layer_count: usize) -> IOPattern {
+fn create_io_pattern(layer_count: usize, whir_config: &WhirConfig) -> IOPattern {
     let mut io: IOPattern = IOPattern::new("🌪️");
+
+    io = io.commit_statement(whir_config);
 
     io = io
         .add_sumcheck_polynomials(2, 1);
@@ -203,6 +268,8 @@ fn create_io_pattern(layer_count: usize) -> IOPattern {
         io = io.add_sumcheck_polynomials(4, i);
         io = io.add_sumcheck_polynomials(2, 1);
     }
+    
+    io = io.add_whir_proof(whir_config);
 
     io
 }
