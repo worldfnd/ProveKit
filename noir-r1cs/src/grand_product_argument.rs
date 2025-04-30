@@ -7,6 +7,8 @@ pub struct GrandProductArgument {}
 
 pub struct GrandProductArgumentProof {
     transcript: Vec<u8>,
+    claimed_product: FieldElement,
+    num_of_layers: usize,
 }
 
 impl GrandProductArgument {
@@ -15,89 +17,86 @@ impl GrandProductArgument {
     }
 
     pub fn prove(&self)  {
-        let io: IOPattern = IOPattern::new("🌪️")
-        .add_sumcheck_polynomials(2, 1)
-        .add_sumcheck_polynomials(4, 1)
-        .add_sumcheck_polynomials(2, 1);
+        let array_to_prove = (2..=33).map(|x| FieldElement::from(x as u64)).collect::<Vec<_>>();
+        let layers = calculate_binary_multiplication_tree(array_to_prove);
 
+        let io = create_io_pattern(layers.len());
         let mut merlin = io.to_prover_state();
+        let mut saved_val_for_sumcheck_equality_assertion;
+        let mut r;
+        let mut line_evaluations;
+        let mut alpha = Vec::<FieldElement>::new();
 
-        let l_evaluations = EvaluationsList::new(vec![FieldElement::from(362880), FieldElement::from(980179200 as u64)]);
-        let l_temp = l_evaluations.to_coeffs();
-        let mut l: &[ark_ff::Fp<ark_ff::MontBackend<whir::crypto::fields::BN254Config, 4>, 4>] = l_temp.coeffs();
-        
-        merlin
-        .add_scalars(&mut l)
-        .expect("Failed to add l");
+        (merlin, r, saved_val_for_sumcheck_equality_assertion) = add_line_to_merlin(merlin, layers[1].clone());
 
-        let mut r = [FieldElement::from(0); 1];
-        merlin.fill_challenge_scalars(&mut r)
-        .expect("Failed to add a challenge scalar");
+        for i in 2..layers.len() {
+            (merlin, line_evaluations, alpha) = run_sumcheck(merlin, &r, layers[i].clone(), saved_val_for_sumcheck_equality_assertion, alpha);
+            (merlin, r, saved_val_for_sumcheck_equality_assertion) = add_line_to_merlin(merlin, line_evaluations.to_vec());
+        }
 
-        let saved_val_for_sumcheck_equality_assertion = eval_linear_poly(&l, &r[0]);
-        
-        let mut eq_r = calculate_evaluations_over_boolean_hypercube_for_eq(&r);
-        let mut v0 = vec![FieldElement::from(120), FieldElement::from(17160)];
-        let mut v1 = vec![FieldElement::from(3024), FieldElement::from(57120)];
-        
-        let merlin = run_sumcheck(merlin, &mut v0, &mut v1, &mut eq_r, saved_val_for_sumcheck_equality_assertion);
+        alpha.push(r[0]);
 
         let transcript = merlin.narg_string().to_vec();
-        let proof = GrandProductArgumentProof { transcript};
+        let proof = GrandProductArgumentProof { 
+            transcript,
+            claimed_product: layers[0][0],
+            num_of_layers: layers.len(),
+        };
         self.verify(proof);
     }
 
     pub fn verify(&self, proof: GrandProductArgumentProof) {
-        let io: IOPattern = IOPattern::new("🌪️")
-        .add_sumcheck_polynomials(2, 1)
-        .add_sumcheck_polynomials(4, 1)
-        .add_sumcheck_polynomials(2, 1);
-
+        let io = create_io_pattern(proof.num_of_layers);
         let mut arthur = io.to_verifier_state(&proof.transcript);
 
         let mut l = [FieldElement::from(0); 2];
-        arthur.fill_next_scalars(&mut l)
-            .expect("Failed to fill next scalars");
-
         let mut r = [FieldElement::from(0); 1];
-        arthur.fill_challenge_scalars(&mut r)
-            .expect("Failed to fill next scalars");
-
-        assert_eq!(eval_linear_poly(&l, &FieldElement::from(0)) * eval_linear_poly(&l, &FieldElement::from(1)), FieldElement::from(355687428096000 as u64));
-
         let mut h = [FieldElement::from(0); 4];
-        arthur.fill_next_scalars(&mut h)
-            .expect("Failed to fill next scalars");
-        let mut alpha_verifier = [FieldElement::from(0); 1];
-        arthur.fill_challenge_scalars(&mut alpha_verifier)
-            .expect("Failed to fill next scalars");
+        let mut alpha = [FieldElement::from(0); 1];
+        let mut last_sumcheck_value= proof.claimed_product;
 
-        assert_eq!(eval_qubic_poly(&h, &FieldElement::from(0)) + eval_qubic_poly(&h, &FieldElement::from(1)), eval_linear_poly(&l, &r[0]));
-        
-        let mut left_side = calculate_eq(&r, &alpha_verifier);
+        let mut prev_rand = Vec::<FieldElement>::new();
+        let mut rand = Vec::<FieldElement>::new();
 
-        arthur.fill_next_scalars(&mut l)
-            .expect("Failed to fill next scalars");
-        arthur.fill_challenge_scalars(&mut r)
-            .expect("Failed to fill next scalars");
-
-        left_side = left_side * eval_linear_poly(&l, &FieldElement::from(0)) * eval_linear_poly(&l, &FieldElement::from(1));
-        
-        assert_eq!(left_side, eval_qubic_poly(&h, &alpha_verifier[0]));
+        for i in 0..proof.num_of_layers-1 {
+            for _ in 0..i {
+                arthur.fill_next_scalars(&mut h)
+                    .expect("Failed to fill next scalars");
+                arthur.fill_challenge_scalars(&mut alpha)
+                    .expect("Failed to fill next scalars");
+                assert_eq!(eval_qubic_poly(&h, &FieldElement::from(0)) + eval_qubic_poly(&h, &FieldElement::from(1)), last_sumcheck_value);
+                rand.push(alpha[0]);
+                last_sumcheck_value = eval_qubic_poly(&h, &alpha[0]);
+            }
+            arthur.fill_next_scalars(&mut l)
+                .expect("Failed to fill next scalars");
+            arthur.fill_challenge_scalars(&mut r)
+                .expect("Failed to fill next scalars");
+            let claimed_last_sch = calculate_eq(&prev_rand, &rand) * eval_linear_poly(&l, &FieldElement::from(0)) * eval_linear_poly(&l, &FieldElement::from(1));
+            assert_eq!(claimed_last_sch, last_sumcheck_value);
+            rand.push(r[0]);
+            prev_rand = rand;
+            rand = Vec::<FieldElement>::new();
+            last_sumcheck_value = eval_linear_poly(&l, &r[0]);
+        }
     }
 }
 
 fn run_sumcheck(
     mut merlin: ProverState<SkyscraperSponge, FieldElement>,
-    mut v0: &mut Vec<FieldElement>,
-    mut v1: &mut Vec<FieldElement>,
-    mut eq_r: &mut Vec<FieldElement>,
+    r: &[FieldElement; 1],
+    layer: Vec<FieldElement>,
     mut saved_val_for_sumcheck_equality_assertion: FieldElement,
-) -> ProverState<SkyscraperSponge, FieldElement> {
+    mut alpha: Vec<FieldElement>,
+) -> (ProverState<SkyscraperSponge, FieldElement>, [FieldElement; 2], Vec<FieldElement>) {
+    let (mut v0, mut v1) = split_by_index(layer);
+    alpha.push(r[0]);
+    let mut eq_r = calculate_evaluations_over_boolean_hypercube_for_eq(&alpha);
     let mut alpha_i_wrapped_in_vector = [FieldElement::from(0)];
+    let mut alpha = Vec::<FieldElement>::new();
     let mut fold = None;
 
-    for _ in 0..1 {
+    loop {
         let [hhat_i_at_0, hhat_i_at_em1, hhat_i_at_inf_over_x_cube] =
             sumcheck_fold_map_reduce([&mut eq_r, &mut v0, &mut v1], fold, |[eq_r, v0, v1]| {
                 [
@@ -144,22 +143,83 @@ fn run_sumcheck(
         let _ = merlin.fill_challenge_scalars(&mut alpha_i_wrapped_in_vector);
         fold = Some(alpha_i_wrapped_in_vector[0]);
         saved_val_for_sumcheck_equality_assertion = eval_qubic_poly(&hhat_i_coeffs, &alpha_i_wrapped_in_vector[0]);
+        alpha.push(alpha_i_wrapped_in_vector[0]);
+        if eq_r.len() <= 2 {
+            break;
+        }
     }
 
     let folded_v0 = v0[0] + (v0[1] - v0[0]) * alpha_i_wrapped_in_vector[0];
     let folded_v1 = v1[0] + (v1[1] - v1[0]) * alpha_i_wrapped_in_vector[0];
 
-    let l_evaluations = EvaluationsList::new(vec![folded_v0, folded_v1]);
+    (merlin, [folded_v0, folded_v1], alpha) 
+}
+
+fn calculate_binary_multiplication_tree(mut array_to_prove: Vec<FieldElement>) -> Vec<Vec<FieldElement>> {
+    array_to_prove.resize(array_to_prove.len().next_power_of_two(), FieldElement::from(1));
+
+    let mut layers = vec![];
+    let mut current_layer = array_to_prove;
+
+    while current_layer.len() > 1 {
+        let mut next_layer = vec![];
+
+        for i in (0..current_layer.len()).step_by(2) {
+            let product = current_layer[i] * current_layer[i + 1];
+            next_layer.push(product);
+        }
+
+        layers.push(current_layer);
+        current_layer = next_layer;
+    }
+
+    layers.push(current_layer);
+    layers.reverse();
+    layers
+}
+
+fn split_by_index(input: Vec<FieldElement>) -> (Vec<FieldElement>, Vec<FieldElement>) {
+    let mut even_indexed = Vec::new();
+    let mut odd_indexed = Vec::new();
+
+    for (i, item) in input.into_iter().enumerate() {
+        if i % 2 == 0 {
+            even_indexed.push(item);
+        } else {
+            odd_indexed.push(item);
+        }
+    }
+
+    (even_indexed, odd_indexed)
+}
+
+fn create_io_pattern(layer_count: usize) -> IOPattern {
+    let mut io: IOPattern = IOPattern::new("🌪️");
+
+    io = io
+        .add_sumcheck_polynomials(2, 1);
+
+    for i in 1..(layer_count-1) {
+        io = io.add_sumcheck_polynomials(4, i);
+        io = io.add_sumcheck_polynomials(2, 1);
+    }
+
+    io
+}
+
+fn add_line_to_merlin(mut merlin: ProverState<SkyscraperSponge, FieldElement>, arr: Vec<FieldElement>) -> (ProverState<SkyscraperSponge, FieldElement>, [FieldElement; 1], FieldElement) {
+    let l_evaluations = EvaluationsList::new(arr);
     let l_temp = l_evaluations.to_coeffs();
-    let mut l = l_temp.coeffs();
-    
+    let l: &[FieldElement] = l_temp.coeffs();
     merlin
-    .add_scalars(&mut l)
-    .expect("Failed to add h");
+        .add_scalars(&l)
+        .expect("Failed to add l");
 
     let mut r = [FieldElement::from(0); 1];
     merlin.fill_challenge_scalars(&mut r)
-    .expect("Failed to add challenge scalar 1");
+        .expect("Failed to add a challenge scalar");
 
-    merlin
+    let saved_val_for_sumcheck_equality_assertion = eval_linear_poly(&l, &r[0]);
+
+    (merlin, r, saved_val_for_sumcheck_equality_assertion)
 }
