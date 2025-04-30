@@ -127,6 +127,21 @@ impl WhirR1CSScheme {
             "R1CS constraints exceed scheme capacity"
         );
 
+
+        // These can be computed once when the matrix is generated.
+        let mut row_counters = vec![0;r1cs.constraints];
+        let mut col_counters = vec![0;r1cs.witnesses];
+
+        let mut read_ts_row = Vec::<FieldElement>::new();
+        let mut read_ts_col = Vec::<FieldElement>::new();
+
+        r1cs.a().iter().for_each(|((i,j), val)|{
+            read_ts_row.push(FieldElement::from(row_counters[i] as u64));
+            read_ts_col.push(FieldElement::from(col_counters[j] as u64));
+            row_counters[i] += 1;
+            col_counters[j] += 1;
+        });
+
         // Set up transcript
         let io: IOPattern = create_io_pattern(self.m_0, &self.whir_config);
         let merlin = io.to_prover_state();
@@ -143,6 +158,16 @@ impl WhirR1CSScheme {
             run_whir_pcs_prover(witness, &self.whir_config, merlin, self.m, alphas);
 
         let transcript = merlin.narg_string().to_vec();
+
+        let eq_rx = calculate_evaluations_over_boolean_hypercube_for_eq(&alpha);
+        let eq_ry = calculate_evaluations_over_boolean_hypercube_for_eq(&whir_proof.randomness);
+
+        r1cs.a().iter().for_each(|((i,j), val)|{
+            read_ts_row.push(FieldElement::from(row_counters[i] as u64));
+            read_ts_col.push(FieldElement::from(col_counters[j] as u64));
+            row_counters[i] += 1;
+            col_counters[j] += 1;
+        });
 
         Ok(WhirR1CSProof {
             transcript,

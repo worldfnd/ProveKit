@@ -53,11 +53,6 @@ impl GrandProductArgument {
         let poly = EvaluationsList::new(self.arr.clone());
         let polynomial = poly.to_coeffs();
 
-        println!("{:?}", self.arr);
-        println!("{:?}", polynomial);
-        let formatted_config = format!("{:?}", self.whir_config);
-        println!("{}", formatted_config);
-
         let witness = committer
             .commit(&mut merlin, polynomial)
             .expect("WHIR prover failed to commit");
@@ -74,9 +69,6 @@ impl GrandProductArgument {
             (merlin, r, saved_val_for_sumcheck_equality_assertion) = add_line_to_merlin(merlin, line_evaluations.to_vec());
         }
         alpha.push(r[0]);
-
-        println!("Alpha length {:?}", alpha.len());
-        println!("Arr log length {:?}", next_power_of_two(self.arr.len()));
 
         let mut statement = Statement::<FieldElement>::new(next_power_of_two(self.arr.len()));
         let weight = Weights::evaluation(MultilinearPoint(alpha));
