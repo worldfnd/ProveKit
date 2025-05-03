@@ -25,7 +25,7 @@ pub use {
     acir::FieldElement as NoirElement,
     gnark_config::write_gnark_parameters_to_file,
     whir::crypto::fields::Field256 as FieldElement,
-    whir_r1cs::create_io_pattern,
+    whir_r1cs::{create_io_pattern, generate_whir_config},
 };
 use {
     crate::{

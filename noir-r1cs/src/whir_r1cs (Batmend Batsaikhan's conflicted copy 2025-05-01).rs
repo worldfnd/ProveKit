@@ -1,6 +1,7 @@
 use {
     crate::{
-        grand_product_argument::run_sumcheck, skyscraper::{SkyscraperMerkleConfig, SkyscraperPoW, SkyscraperSponge}, utils::{
+        skyscraper::{SkyscraperMerkleConfig, SkyscraperPoW, SkyscraperSponge},
+        utils::{
             next_power_of_two, pad_to_power_of_two, serde_ark, serde_hex,
             sumcheck::{
                 calculate_eq, calculate_evaluations_over_boolean_hypercube_for_eq,
@@ -8,11 +9,19 @@ use {
                 sumcheck_fold_map_reduce, SumcheckIOPattern,
             },
             HALF,
-        }, FieldElement, R1CS
-    }, anyhow::{ensure, Context, Result}, ark_std::{One, Zero}, core::num, serde::{Deserialize, Serialize}, spongefish::{
+        },
+        FieldElement, R1CS,
+    },
+    anyhow::{ensure, Context, Result},
+    ark_std::{One, Zero},
+    serde::{Deserialize, Serialize},
+    spongefish::{
         codecs::arkworks_algebra::{FieldToUnitDeserialize, FieldToUnitSerialize, UnitToField},
         DomainSeparator, ProverState, VerifierState,
-    }, std::fmt::{Debug, Formatter}, tracing::{info, instrument, warn}, whir::{
+    },
+    std::fmt::{Debug, Formatter},
+    tracing::{info, instrument, warn},
+    whir::{
         parameters::{
             default_max_pow, FoldType, FoldingFactor,
             MultivariateParameters as GenericMultivariateParameters, SoundnessType,
@@ -30,7 +39,7 @@ use {
             verifier::Verifier,
             WhirProof as GenericWhirProof,
         },
-    }
+    },
 };
 
 pub type MultivariateParameters = GenericMultivariateParameters<FieldElement>;
@@ -53,8 +62,6 @@ pub struct WhirR1CSProof {
     pub transcript: Vec<u8>,
 
     pub whir_proof: WhirProof,
-
-    pub num_terms: usize,
 
     // TODO: Derive from transcript
     #[serde(with = "serde_ark")]
@@ -120,13 +127,23 @@ impl WhirR1CSScheme {
             "R1CS constraints exceed scheme capacity"
         );
 
-        
-        let num_terms = r1cs.a().iter().count();
 
-        let whir_config_terms = generate_whir_config(num_terms);
-        
+        // These can be computed once when the matrix is generated.
+        let mut row_counters = vec![0;r1cs.constraints];
+        let mut col_counters = vec![0;r1cs.witnesses];
+
+        let mut read_ts_row = Vec::<FieldElement>::new();
+        let mut read_ts_col = Vec::<FieldElement>::new();
+
+        r1cs.a().iter().for_each(|((i,j), val)|{
+            read_ts_row.push(FieldElement::from(row_counters[i] as u64));
+            read_ts_col.push(FieldElement::from(col_counters[j] as u64));
+            row_counters[i] += 1;
+            col_counters[j] += 1;
+        });
+
         // Set up transcript
-        let io: IOPattern = create_io_pattern(self.m_0, &self.whir_config, &whir_config_terms, num_terms);
+        let io: IOPattern = create_io_pattern(self.m_0, &self.whir_config);
         let merlin = io.to_prover_state();
 
         // First round of sumcheck to reduce R1CS to a batch weighted evaluation of the
@@ -137,84 +154,25 @@ impl WhirR1CSScheme {
         let alphas = calculate_external_row_of_r1cs_matrices(&alpha, r1cs);
 
         // Compute WHIR weighted batch opening proof
-        let (whir_proof, mut merlin, whir_query_answer_sums) =
+        let (whir_proof, merlin, whir_query_answer_sums) =
             run_whir_pcs_prover(witness, &self.whir_config, merlin, self.m, alphas);
+
+        let transcript = merlin.narg_string().to_vec();
 
         let eq_rx = calculate_evaluations_over_boolean_hypercube_for_eq(&alpha);
         let eq_ry = calculate_evaluations_over_boolean_hypercube_for_eq(&whir_proof.randomness);
-        let mut e_rx = Vec::<FieldElement>::new();
-        let mut e_ry = Vec::<FieldElement>::new();
-
-        // These can be computed once when the matrix is generated.
-        let mut row_counters = vec![0;r1cs.constraints];
-        let mut col_counters = vec![0;r1cs.witnesses];
-        let mut read_ts_row = Vec::<FieldElement>::new();
-        let mut read_ts_col = Vec::<FieldElement>::new();
-        let mut matrix_row = Vec::<FieldElement>::new();
-        let mut matrix_val = Vec::<FieldElement>::new();
-        let mut matrix_col = Vec::<FieldElement>::new();
 
         r1cs.a().iter().for_each(|((i,j), val)|{
             read_ts_row.push(FieldElement::from(row_counters[i] as u64));
             read_ts_col.push(FieldElement::from(col_counters[j] as u64));
             row_counters[i] += 1;
             col_counters[j] += 1;
-            e_rx.push(eq_rx[i]);
-            e_ry.push(eq_ry[j]);
-            matrix_row.push(FieldElement::from(i as u64));
-            matrix_col.push(FieldElement::from(j as u64));
-            matrix_val.push(val);
         });
-
-        matrix_val = pad_to_power_of_two(matrix_val);
-        e_rx = pad_to_power_of_two(e_rx);
-        e_ry = pad_to_power_of_two(e_ry);
-
-        let num_variables = next_power_of_two(matrix_val.len());
-        let mv_params = MultivariateParameters::new(num_variables);
-        let whir_params = WhirParameters {
-            initial_statement:     true,
-            security_level:        128,
-            pow_bits:              default_max_pow(num_variables, 1),
-            folding_factor:        FoldingFactor::Constant(4),
-            leaf_hash_params:      (),
-            two_to_one_params:     (),
-            soundness_type:        SoundnessType::ConjectureList,
-            fold_optimisation:     FoldType::ProverHelps,
-            _pow_parameters:       Default::default(),
-            starting_log_inv_rate: 1,
-        };
-
-        let committer = CommitmentWriter::new(whir_config_terms.clone());
-
-        let matrix_val_evals = EvaluationsList::new(matrix_val.clone());
-        let matrix_val_coeffs = matrix_val_evals.to_coeffs();
-        let witness_val = committer
-            .commit(&mut merlin, matrix_val_coeffs)
-            .expect("WHIR prover failed to commit");
-
-        let matrix_col_evals = EvaluationsList::new(e_rx.clone());
-        let matrix_col_coeffs = matrix_col_evals.to_coeffs();
-        let witness_col = committer
-            .commit(&mut merlin, matrix_col_coeffs)
-            .expect("WHIR prover failed to commit");
-
-        let matrix_row_evals = EvaluationsList::new(e_ry.clone());
-        let matrix_row_coeffs = matrix_row_evals.to_coeffs();
-        let witness_row = committer
-            .commit(&mut merlin, matrix_row_coeffs)
-            .expect("WHIR prover failed to commit");
-
-        let sumcheck_polynomial_mles = [matrix_val.clone(), e_rx, e_ry];
-        let (mut merlin, line_evaluations, alpha) = run_sumcheck(merlin, sumcheck_polynomial_mles, whir_proof.statement_values_at_random_point[0].clone());
-
-        let transcript = merlin.narg_string().to_vec();
 
         Ok(WhirR1CSProof {
             transcript,
             whir_proof,
             whir_query_answer_sums,
-            num_terms: matrix_val.len(),
         })
     }
 
@@ -222,9 +180,7 @@ impl WhirR1CSScheme {
     #[allow(unused)] // TODO: Fix implementation
     pub fn verify(&self, proof: &WhirR1CSProof) -> Result<()> {
         // Set up transcript
-        let whir_config_terms = generate_whir_config(proof.num_terms);
-
-        let io = create_io_pattern(self.m_0, &self.whir_config, &whir_config_terms, proof.num_terms);
+        let io = create_io_pattern(self.m_0, &self.whir_config);
         let mut arthur = io.to_verifier_state(&proof.transcript);
 
         // Compute statement verifier
@@ -244,27 +200,6 @@ impl WhirR1CSScheme {
             &statement_verifier,
         )
         .context("while verifying WHIR proof")?;
-
-        let commitment_reader = CommitmentReader::new(&whir_config_terms);
-        let verifier = Verifier::new(&whir_config_terms);
-        let parsed_commitment1 = commitment_reader.parse_commitment(&mut arthur).unwrap();
-        let parsed_commitment2 = commitment_reader.parse_commitment(&mut arthur).unwrap();
-        let parsed_commitment3 = commitment_reader.parse_commitment(&mut arthur).unwrap();
-
-        let mut h = [FieldElement::zero(); 4];
-        let mut alpha = [FieldElement::zero(); 1];
-        
-        let mut last_sumcheck_value = proof.whir_proof.statement_values_at_random_point[0].clone();
-
-        for _ in 0..next_power_of_two(proof.num_terms) {
-            arthur.fill_next_scalars(&mut h)
-                .expect("Failed to fill next scalars");
-            arthur.fill_challenge_scalars(&mut alpha)
-                .expect("Failed to fill next scalars");
-            assert_eq!(eval_qubic_poly(&h, &FieldElement::from(0)) + eval_qubic_poly(&h, &FieldElement::from(1)), last_sumcheck_value);
-            last_sumcheck_value = eval_qubic_poly(&h, &alpha[0]);
-        }
-
 
         // Check the Spartan sumcheck relation.
         ensure!(
@@ -481,35 +416,10 @@ pub fn run_whir_pcs_verifier(
 }
 
 #[instrument(skip_all)]
-pub fn create_io_pattern(m_0: usize, whir_params: &WhirConfig, whir_params_terms: &WhirConfig, num_terms: usize) -> IOPattern {
+pub fn create_io_pattern(m_0: usize, whir_params: &WhirConfig) -> IOPattern {
     IOPattern::new("🌪️")
         .add_rand(m_0)
         .add_sumcheck_polynomials(4, m_0)
         .commit_statement(&whir_params)
         .add_whir_proof(&whir_params)
-        .commit_statement(&whir_params_terms)
-        .commit_statement(&whir_params_terms)
-        .commit_statement(&whir_params_terms)
-        .add_sumcheck_polynomials(4, next_power_of_two(num_terms))
-}
-
-pub fn generate_whir_config(num_coeffs: usize) -> WhirConfig {
-    let num_variables = next_power_of_two(num_coeffs);
-    let mv_params = MultivariateParameters::new(num_variables);
-    let whir_params = WhirParameters {
-        initial_statement:     true,
-        security_level:        128,
-        pow_bits:              default_max_pow(num_variables, 1),
-        folding_factor:        FoldingFactor::Constant(4),
-        leaf_hash_params:      (),
-        two_to_one_params:     (),
-        soundness_type:        SoundnessType::ConjectureList,
-        fold_optimisation:     FoldType::ProverHelps,
-        _pow_parameters:       Default::default(),
-        starting_log_inv_rate: 1,
-    };
-
-    let whir_config = WhirConfig::new(mv_params, whir_params);
-
-    return whir_config;
 }

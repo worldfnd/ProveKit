@@ -4,7 +4,7 @@ use {
     argh::FromArgs,
     ark_serialize::CanonicalSerialize,
     noir_r1cs::{
-        create_io_pattern, read, write_gnark_parameters_to_file, NoirProof, NoirProofScheme,
+        create_io_pattern, generate_whir_config, read, write_gnark_parameters_to_file, NoirProof, NoirProofScheme
     },
     std::{fs::File, io::Write, path::PathBuf},
     tracing::{info, instrument},
@@ -35,10 +35,13 @@ impl Command for Args {
         // Read the proof
         let proof: NoirProof = read(&self.proof_path).context("while reading proof")?;
 
+        let term_count = scheme.r1cs.a().iter().count();
+        let whir_config_terms = generate_whir_config(term_count);
+        
         write_gnark_parameters_to_file(
             &scheme.whir.whir_config,
             &proof.whir_r1cs_proof.transcript,
-            &create_io_pattern(scheme.whir.m_0, &scheme.whir.whir_config),
+            &create_io_pattern(scheme.whir.m_0, &scheme.whir.whir_config, &whir_config_terms, term_count),
             proof.whir_r1cs_proof.whir_query_answer_sums,
             scheme.whir.m_0,
             scheme.whir.m,

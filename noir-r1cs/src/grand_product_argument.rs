@@ -65,7 +65,11 @@ impl GrandProductArgument {
         (merlin, r, saved_val_for_sumcheck_equality_assertion) = add_line_to_merlin(merlin, layers[1].clone());
 
         for i in 2..layers.len() {
-            (merlin, line_evaluations, alpha) = run_sumcheck(merlin, &r, layers[i].clone(), saved_val_for_sumcheck_equality_assertion, alpha);
+            alpha.push(r[0]);
+            let mut eq_r = calculate_evaluations_over_boolean_hypercube_for_eq(&alpha);
+            let (mut v0, mut v1) = split_by_index(layers[i].clone());
+            let sumcheck_polynomial_mles = [eq_r, v0, v1];
+            (merlin, line_evaluations, alpha) = run_sumcheck(merlin, sumcheck_polynomial_mles, saved_val_for_sumcheck_equality_assertion);
             (merlin, r, saved_val_for_sumcheck_equality_assertion) = add_line_to_merlin(merlin, line_evaluations.to_vec());
         }
         alpha.push(r[0]);
@@ -139,37 +143,37 @@ impl GrandProductArgument {
 
 }
 
-fn run_sumcheck(
+pub fn run_sumcheck(
     mut merlin: ProverState<SkyscraperSponge, FieldElement>,
-    r: &[FieldElement; 1],
-    layer: Vec<FieldElement>,
+    mut mles: [Vec<FieldElement>; 3],
     mut saved_val_for_sumcheck_equality_assertion: FieldElement,
-    mut alpha: Vec<FieldElement>,
 ) -> (ProverState<SkyscraperSponge, FieldElement>, [FieldElement; 2], Vec<FieldElement>) {
-    let (mut v0, mut v1) = split_by_index(layer);
-    alpha.push(r[0]);
-    let mut eq_r = calculate_evaluations_over_boolean_hypercube_for_eq(&alpha);
     let mut alpha_i_wrapped_in_vector = [FieldElement::from(0)];
     let mut alpha = Vec::<FieldElement>::new();
     let mut fold = None;
 
+    let mut m0 = mles[0].clone();
+    let mut m1 = mles[1].clone();
+    let mut m2 = mles[2].clone();
+    
+
     loop {
         let [hhat_i_at_0, hhat_i_at_em1, hhat_i_at_inf_over_x_cube] =
-            sumcheck_fold_map_reduce([&mut eq_r, &mut v0, &mut v1], fold, |[eq_r, v0, v1]| {
+            sumcheck_fold_map_reduce([&mut m0, &mut m1, &mut m2], fold, |[m0, m1, m2]| {
                 [
                     // Evaluation at 0
-                    eq_r.0 * v0.0 * v1.0,
+                    m0.0 * m1.0 * m2.0,
                     // Evaluation at -1
-                    (eq_r.0 + eq_r.0 - eq_r.1) * (v0.0 + v0.0 - v0.1) * (v1.0 + v1.0 - v1.1),
+                    (m0.0 + m0.0 - m0.1) * (m1.0 + m1.0 - m1.1) * (m2.0 + m2.0 - m2.1),
                     // Evaluation at infinity
-                    (eq_r.1 - eq_r.0) * (v0.1 - v0.0) * (v1.1 - v1.0),
+                    (m0.1 - m0.0) * (m1.1 - m1.0) * (m2.1 - m2.0),
                 ]
             });
 
         if fold.is_some() {
-            eq_r.truncate(eq_r.len() / 2);
-            v0.truncate(v0.len() / 2);
-            v1.truncate(v1.len() / 2);
+            m0.truncate(m0.len() / 2);
+            m1.truncate(m1.len() / 2);
+            m2.truncate(m2.len() / 2);
         }
 
         let mut hhat_i_coeffs = [FieldElement::from(0); 4];
@@ -201,13 +205,13 @@ fn run_sumcheck(
         fold = Some(alpha_i_wrapped_in_vector[0]);
         saved_val_for_sumcheck_equality_assertion = eval_qubic_poly(&hhat_i_coeffs, &alpha_i_wrapped_in_vector[0]);
         alpha.push(alpha_i_wrapped_in_vector[0]);
-        if eq_r.len() <= 2 {
+        if m0.len() <= 2 {
             break;
         }
     }
 
-    let folded_v0 = v0[0] + (v0[1] - v0[0]) * alpha_i_wrapped_in_vector[0];
-    let folded_v1 = v1[0] + (v1[1] - v1[0]) * alpha_i_wrapped_in_vector[0];
+    let folded_v0 = m1[0] + (m1[1] - m1[0]) * alpha_i_wrapped_in_vector[0];
+    let folded_v1 = m2[0] + (m2[1] - m2[0]) * alpha_i_wrapped_in_vector[0];
 
     (merlin, [folded_v0, folded_v1], alpha) 
 }
