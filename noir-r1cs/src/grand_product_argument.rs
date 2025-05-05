@@ -70,7 +70,7 @@ impl GrandProductArgument {
             let (mut v0, mut v1) = split_by_index(layers[i].clone());
             let sumcheck_polynomial_mles = [eq_r, v0, v1];
             (merlin, line_evaluations, alpha) = run_sumcheck(merlin, sumcheck_polynomial_mles, saved_val_for_sumcheck_equality_assertion);
-            (merlin, r, saved_val_for_sumcheck_equality_assertion) = add_line_to_merlin(merlin, line_evaluations.to_vec());
+            (merlin, r, saved_val_for_sumcheck_equality_assertion) = add_line_to_merlin(merlin, line_evaluations[1..3].to_vec());
         }
         alpha.push(r[0]);
 
@@ -147,7 +147,7 @@ pub fn run_sumcheck(
     mut merlin: ProverState<SkyscraperSponge, FieldElement>,
     mut mles: [Vec<FieldElement>; 3],
     mut saved_val_for_sumcheck_equality_assertion: FieldElement,
-) -> (ProverState<SkyscraperSponge, FieldElement>, [FieldElement; 2], Vec<FieldElement>) {
+) -> (ProverState<SkyscraperSponge, FieldElement>, [FieldElement; 3], Vec<FieldElement>) {
     let mut alpha_i_wrapped_in_vector = [FieldElement::from(0)];
     let mut alpha = Vec::<FieldElement>::new();
     let mut fold = None;
@@ -210,10 +210,11 @@ pub fn run_sumcheck(
         }
     }
 
-    let folded_v0 = m1[0] + (m1[1] - m1[0]) * alpha_i_wrapped_in_vector[0];
-    let folded_v1 = m2[0] + (m2[1] - m2[0]) * alpha_i_wrapped_in_vector[0];
+    let folded_v0 = m0[0] + (m0[1] - m0[0]) * alpha_i_wrapped_in_vector[0];
+    let folded_v1 = m1[0] + (m1[1] - m1[0]) * alpha_i_wrapped_in_vector[0];
+    let folded_v2 = m2[0] + (m2[1] - m2[0]) * alpha_i_wrapped_in_vector[0];
 
-    (merlin, [folded_v0, folded_v1], alpha) 
+    (merlin, [folded_v0, folded_v1, folded_v2], alpha) 
 }
 
 fn calculate_binary_multiplication_tree(array_to_prove: Vec<FieldElement>) -> Vec<Vec<FieldElement>> {

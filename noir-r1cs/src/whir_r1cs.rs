@@ -18,7 +18,7 @@ use {
             MultivariateParameters as GenericMultivariateParameters, SoundnessType,
             WhirParameters as GenericWhirParameters,
         },
-        poly_utils::evals::EvaluationsList,
+        poly_utils::{evals::EvaluationsList, multilinear::MultilinearPoint},
         whir::{
             committer::{CommitmentReader, CommitmentWriter},
             domainsep::WhirDomainSeparator,
@@ -54,11 +54,26 @@ pub struct WhirR1CSProof {
 
     pub whir_proof: WhirProof,
 
+    pub proof_val:  WhirProof,
+
+    pub proof_e_rx: WhirProof,
+
+    pub proof_e_ry: WhirProof,
+
     pub num_terms: usize,
 
     // TODO: Derive from transcript
     #[serde(with = "serde_ark")]
     pub whir_query_answer_sums: [FieldElement; 3],
+
+    #[serde(with = "serde_ark")]
+    pub val: FieldElement,
+
+    #[serde(with = "serde_ark")]
+    pub e_rx: FieldElement,
+
+    #[serde(with = "serde_ark")]
+    pub e_ry: FieldElement,
 }
 
 struct DataFromSumcheckVerifier {
@@ -193,28 +208,61 @@ impl WhirR1CSScheme {
             .commit(&mut merlin, matrix_val_coeffs)
             .expect("WHIR prover failed to commit");
 
-        let matrix_col_evals = EvaluationsList::new(e_rx.clone());
-        let matrix_col_coeffs = matrix_col_evals.to_coeffs();
-        let witness_col = committer
-            .commit(&mut merlin, matrix_col_coeffs)
+        let matrix_e_rx_evals = EvaluationsList::new(e_rx.clone());
+        let matrix_e_rx_coeffs = matrix_e_rx_evals.to_coeffs();
+        let witness_e_rx = committer
+            .commit(&mut merlin, matrix_e_rx_coeffs)
             .expect("WHIR prover failed to commit");
 
-        let matrix_row_evals = EvaluationsList::new(e_ry.clone());
-        let matrix_row_coeffs = matrix_row_evals.to_coeffs();
-        let witness_row = committer
-            .commit(&mut merlin, matrix_row_coeffs)
+        let matrix_e_ry_evals = EvaluationsList::new(e_ry.clone());
+        let matrix_e_ry_coeffs = matrix_e_ry_evals.to_coeffs();
+        let witness_e_ry = committer
+            .commit(&mut merlin, matrix_e_ry_coeffs)
             .expect("WHIR prover failed to commit");
 
         let sumcheck_polynomial_mles = [matrix_val.clone(), e_rx, e_ry];
         let (mut merlin, line_evaluations, alpha) = run_sumcheck(merlin, sumcheck_polynomial_mles, whir_proof.statement_values_at_random_point[0].clone());
+
+        let mut statement_val = Statement::<FieldElement>::new(num_variables);
+        let weight_val = Weights::evaluation(MultilinearPoint(alpha.clone()));
+        statement_val.add_constraint(weight_val, line_evaluations[0].clone());
+
+        let prover_val = Prover(whir_config_terms.clone());
+        let proof_val = prover_val
+            .prove(&mut merlin, statement_val, witness_val)
+            .expect("WHIR prover failed to generate a proof");
+
+        let mut statement_e_rx = Statement::<FieldElement>::new(num_variables);
+        let weight_e_rx = Weights::evaluation(MultilinearPoint(alpha.clone()));
+        statement_e_rx.add_constraint(weight_e_rx, line_evaluations[1].clone());
+
+        let prover_e_rx = Prover(whir_config_terms.clone());
+        let proof_e_rx = prover_e_rx
+            .prove(&mut merlin, statement_e_rx, witness_e_rx)
+            .expect("WHIR prover failed to generate a proof");
+
+        let mut statement_e_ry = Statement::<FieldElement>::new(num_variables);
+        let weight_e_ry = Weights::evaluation(MultilinearPoint(alpha.clone()));
+        statement_e_ry.add_constraint(weight_e_ry, line_evaluations[2].clone());
+
+        let prover_e_ry = Prover(whir_config_terms.clone());
+        let proof_e_ry = prover_e_ry
+            .prove(&mut merlin, statement_e_ry, witness_e_ry)
+            .expect("WHIR prover failed to generate a proof");
 
         let transcript = merlin.narg_string().to_vec();
 
         Ok(WhirR1CSProof {
             transcript,
             whir_proof,
+            proof_val,
+            proof_e_rx,
+            proof_e_ry,
             whir_query_answer_sums,
             num_terms: matrix_val.len(),
+            val: line_evaluations[0].clone(),
+            e_rx: line_evaluations[1].clone(),
+            e_ry: line_evaluations[2].clone(),
         })
     }
 
@@ -251,6 +299,7 @@ impl WhirR1CSScheme {
         let parsed_commitment2 = commitment_reader.parse_commitment(&mut arthur).unwrap();
         let parsed_commitment3 = commitment_reader.parse_commitment(&mut arthur).unwrap();
 
+        let mut alpha_collector = Vec::<FieldElement>::new();
         let mut h = [FieldElement::zero(); 4];
         let mut alpha = [FieldElement::zero(); 1];
         
@@ -263,9 +312,33 @@ impl WhirR1CSScheme {
                 .expect("Failed to fill next scalars");
             assert_eq!(eval_qubic_poly(&h, &FieldElement::from(0)) + eval_qubic_poly(&h, &FieldElement::from(1)), last_sumcheck_value);
             last_sumcheck_value = eval_qubic_poly(&h, &alpha[0]);
+            alpha_collector.push(alpha[0]);
         }
 
+        let weights = VerifierWeights::evaluation(MultilinearPoint(alpha_collector));
+        
+        let mut statement_verifier_val = StatementVerifier::from_statement(&Statement::<FieldElement>::new(next_power_of_two(proof.num_terms)));
+        statement_verifier_val.add_constraint(weights.clone(), proof.val.clone());
+        let verifier = Verifier::new(&whir_config_terms);
+        verifier.verify(&mut arthur, &parsed_commitment1, &statement_verifier_val, &proof.proof_val)
+            .expect("WHIR verifier failed to verify the proof");
 
+        let mut statement_verifier_e_rx = StatementVerifier::from_statement(&Statement::<FieldElement>::new(next_power_of_two(proof.num_terms)));
+        statement_verifier_e_rx.add_constraint(weights.clone(), proof.e_rx.clone());
+        let verifier = Verifier::new(&whir_config_terms);
+        verifier.verify(&mut arthur, &parsed_commitment2, &statement_verifier_e_rx, &proof.proof_e_rx)
+            .expect("WHIR verifier failed to verify the proof");
+
+        let mut statement_verifier_e_ry = StatementVerifier::from_statement(&Statement::<FieldElement>::new(next_power_of_two(proof.num_terms)));
+        statement_verifier_e_ry.add_constraint(weights, proof.e_ry.clone());
+        let verifier = Verifier::new(&whir_config_terms);
+        verifier.verify(&mut arthur, &parsed_commitment3, &statement_verifier_e_ry, &proof.proof_e_ry)
+            .expect("WHIR verifier failed to verify the proof");
+        
+        ensure!(
+            last_sumcheck_value == proof.val * proof.e_rx * proof.e_ry,
+            "last sumcheck value does not match"
+        );
         // Check the Spartan sumcheck relation.
         ensure!(
             data_from_sumcheck_verifier.last_sumcheck_val
@@ -491,6 +564,9 @@ pub fn create_io_pattern(m_0: usize, whir_params: &WhirConfig, whir_params_terms
         .commit_statement(&whir_params_terms)
         .commit_statement(&whir_params_terms)
         .add_sumcheck_polynomials(4, next_power_of_two(num_terms))
+        .add_whir_proof(&whir_params_terms)
+        .add_whir_proof(&whir_params_terms)
+        .add_whir_proof(&whir_params_terms)
 }
 
 pub fn generate_whir_config(num_coeffs: usize) -> WhirConfig {
