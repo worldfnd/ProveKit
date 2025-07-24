@@ -61,10 +61,14 @@ pub struct WhirR1CSProof {
     pub whir_query_answer_sums: [FieldElement; 3],
 }
 
-struct DataFromSumcheckVerifier {
-    r:                 Vec<FieldElement>,
-    alpha:             Vec<FieldElement>,
-    last_sumcheck_val: FieldElement,
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataFromSumcheckVerifier {
+    #[serde(with = "serde_ark")]
+    pub r:                 Vec<FieldElement>,
+    #[serde(with = "serde_ark")]
+    pub alpha:             Vec<FieldElement>,
+    #[serde(with = "serde_ark")]
+    pub last_sumcheck_val: FieldElement,
 }
 
 impl WhirR1CSScheme {
