@@ -33,7 +33,7 @@ pub fn sha256_var<let N: u32>(msg: [u8; N], message_size: u64) -> HASH {
             let msg_start = BLOCK_SIZE * i;
             // Safety: The `verify_msg_block` function should cover this.
             let (new_msg_block, new_msg_byte_ptr) =
-                unsafe { build_msg_block(msg, message_size, msg_start) };
+                checked_build_msg_block(msg, message_size, msg_start);
 
             if msg_start < message_size {
                 msg_block = new_msg_block;
@@ -60,7 +60,7 @@ pub fn sha256_var<let N: u32>(msg: [u8; N], message_size: u64) -> HASH {
             let msg_start = BLOCK_SIZE * num_blocks;
             // Safety: The `verify_msg_block` function should cover this.
             let (new_msg_block, new_msg_byte_ptr) =
-                unsafe { build_msg_block(msg, message_size, msg_start) };
+                checked_build_msg_block(msg, message_size, msg_start);
 
             if msg_start < message_size {
                 msg_block = new_msg_block;
@@ -195,6 +195,21 @@ unconstrained fn build_msg_block<let N: u32>(
     // Returning the index as if it was a 64 byte array.
     // We have to project it down to 16 items and bit shifting to get a byte back if we need it.
     (msg_block, block_input)
+}
+
+fn checked_build_msg_block<let N: u32>(
+    msg: [u8; N],
+    message_size: u32,
+    msg_start: u32,
+) -> (MSG_BLOCK, BLOCK_BYTE_PTR) {
+    if msg_start < message_size {
+        let (block, ptr) = unsafe { build_msg_block(msg, message_size, msg_start) };
+        let ptr_check = verify_msg_block(msg, message_size, block, msg_start);
+        assert(ptr == ptr_check);
+        (block, ptr)
+    } else {
+        ([0; INT_BLOCK_SIZE], 0)
+    }
 }
 
 // Verify the block we are compressing was appropriately constructed by `build_msg_block`
